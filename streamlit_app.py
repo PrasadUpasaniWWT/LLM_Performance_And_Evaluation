@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 import numpy as np
 import plotly.express as px
-
+import json
 # --- Page Config ---
 st.set_page_config(page_title="LLM Performance and Evaluation", page_icon="assets/WWT_Monogram_1.png", layout="wide")
 
@@ -44,25 +44,50 @@ def parse_run_time(rt_str):
 # --- Page: Home ---
 if st.session_state.page == "Home":
     # Centered layout
-    col1, col2, col3 = st.columns([1, 3, 1])
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.title(":blue[LLM Load Test]")
 
-        # --- Input Form ---
+        def disable_submit():
+            st.session_state.disabled = True
+
+        if "disabled" not in st.session_state:
+            st.session_state.disabled = False
+
+
         with st.form("load_test_form"):
             users = st.number_input("Number of Users", min_value=1, value=10)
             spawn_rate = st.number_input("Spawn Rate (users/sec)", min_value=1, value=2)
             run_time = st.text_input("Run Time (e.g., 1m, 30s, 2m30s)", value="1m")
             target_url = st.text_input("Target URL", value="https://your-model-endpoint.com")
 
-            submitted = st.form_submit_button("Start Load Test")
-
+            submitted = st.form_submit_button(
+                "Start Load Test",
+                on_click=disable_submit,
+                disabled=st.session_state.disabled
+            )
+    
         # --- Launch Test & Show Progress ---
         if submitted:
             st.markdown(f"<h4 style='color:{DARK_BLUE};'>Running Load Test...</h4>", unsafe_allow_html=True)
 
             # Parse duration
             duration = parse_run_time(run_time)
+
+            # Save test config to file
+            timestamp_prefix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            config_data = {
+                "timestamp": timestamp_prefix,
+                "users": users,
+                "spawn_rate": spawn_rate,
+                "run_time": run_time,
+                "target_url": target_url
+            }
+
+            os.makedirs("data", exist_ok=True)
+            with open(f"data/{timestamp_prefix}_config.json", "w") as f:
+                json.dump(config_data, f, indent=4)
+
 
             # --- Start Locust first ---
             command = [
@@ -74,7 +99,8 @@ if st.session_state.page == "Home":
                 "--headless",
                 "--run-time", run_time,
             ]
-            subprocess.Popen(command)
+            os.environ["TEST_TIMESTAMP"] = timestamp_prefix
+            subprocess.Popen(command, env=os.environ)
 
             # --- Show progress bar while test runs ---
             progress_bar = st.progress(0)
@@ -87,6 +113,7 @@ if st.session_state.page == "Home":
                 status_text.markdown(f"<p style='color:{NAVY};'>Progress: {percent}%</p>", unsafe_allow_html=True)
 
             st.success("Load test completed. Redirecting to Dashboard...")
+            st.session_state.disabled = False
             time.sleep(1.5)
             st.session_state.page = "Dashboard"
             st.rerun()
@@ -95,12 +122,11 @@ if st.session_state.page == "Home":
 
 # --- Page: Dashboard ---
 elif st.session_state.page == "Dashboard":
-
     BLUE = "#0086EA"
     RED = "#EE282A"
     VIOLET = "#330072"
     NAVY = "#1D1E4B"
-
+    # Checking data folder for files with todays date
     DATA_DIR = "data"
     today_str = datetime.today().strftime("%Y-%m-%d")
 
@@ -108,31 +134,39 @@ elif st.session_state.page == "Dashboard":
         [f for f in os.listdir(DATA_DIR) if f.endswith("_metrics.csv") and f.startswith(today_str)],
         reverse=True
     )
-
+    # Giving filenames as options in select box
     if not metric_files:
         st.warning("No metrics files found for today in the data folder.")
     else:
         selected_file = st.selectbox("Select a Test File:", metric_files)
         file_path = os.path.join(DATA_DIR, selected_file)
 
+        timestamp_prefix = selected_file.replace("_metrics.csv", "")
+        config_file_path = os.path.join(DATA_DIR, f"{timestamp_prefix}_config.json")
+
+        if os.path.exists(config_file_path):
+            with open(config_file_path) as f:
+                config = json.load(f)
+
+            config_summary = (
+                f"**Test Config** | "
+                f"🕒 `{config.get('timestamp', '-')}` | "
+                f"👥 Users: `{config.get('users', '-')}` | "
+                f"⚡ Spawn Rate: `{config.get('spawn_rate', '-')}/s` | "
+                f"⏱️ Duration: `{config.get('run_time', '-')}`"
+            )
+            st.markdown(config_summary)
+        else:
+            st.warning(f"Config file not found for `{timestamp_prefix}`.")
+
+
         try:
             df = pd.read_csv(file_path)
+            # To find test duration
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             start_time = df["timestamp"].min()
             end_time = df["timestamp"].max()
             duration_sec = max((end_time - start_time).total_seconds(), 1)
-
-            # --- Metrics ---
-            metrics = [
-                ("Total Requests", len(df)),
-                ("Failures", len(df[df["status"] != "success"])),
-                ("RPS", round(len(df) / duration_sec, 2)),
-                ("Avg Latency", f"{round(df['total_latency'].mean(), 2)} s"),
-                ("P50 Latency", f"{round(np.percentile(df['total_latency'], 50), 2)} s"),
-                ("P95 Latency", f"{round(np.percentile(df['total_latency'], 95), 2)} s"),
-                ("Min Latency", f"{round(df['total_latency'].min(), 2)} s"),
-                ("Max Latency", f"{round(df['total_latency'].max(), 2)} s"),
-            ]
 
             # --- Optimized CSS ---
             st.markdown("""
@@ -172,14 +206,132 @@ elif st.session_state.page == "Dashboard":
             }
 
             .metric-value {
-                font-size: 26px;
+                font-size: 16px;
                 font-weight: bold;
                 color: #000;
             }
             </style>
             """, unsafe_allow_html=True)
 
+            # Metrics (Max users before PD, Max users WF, TTFT at peak)
+            st.subheader(":blue[Performance at a Glance]")
+            # --- Define Thresholds ---
+            high_ttft_threshold = 2.0   # sec
+            high_tpot_threshold = 0.2    # sec
+            low_tps_threshold = 5.0      # tokens/sec
+
+            # Initialize safe defaults
+            max_users_tested = config.get("users", "-")
+            max_safe_users = max_users_tested
+            max_perf_users = max_users_tested
+
+            # --- Detect First Failure ---
+            failed_df = df[df["status"] != "success"]
+            if not failed_df.empty:
+                first_fail_index = failed_df.index[0]
+                max_safe_users = int(df.loc[first_fail_index, "concurrent_requests"])
+
+            # --- Detect First Performance Degradation ---
+            def is_degraded(row):
+                return (
+                    row["ttft"] > high_ttft_threshold or
+                    row["tpot"] > high_tpot_threshold or
+                    row["tps"] < low_tps_threshold
+                )
+            degraded_rows = df[df.apply(is_degraded, axis=1)]
+            if not degraded_rows.empty:
+                first_degrade_index = degraded_rows.index[0]
+                max_perf_users = int(df.loc[first_degrade_index, "concurrent_requests"])
+            
+            # TTFT at peak
+            high_conc_threshold = df["concurrent_requests"].quantile(0.6)
+            high_load_df = df[df["concurrent_requests"] >= high_conc_threshold]
+            ttft_at_peak = high_load_df["ttft"].mean()
+
+            # Calculate metrics (TPS, RPS, Error Rate)
+            total_tokens = df["tokens_per_request"].sum()
+            total_requests = len(df)
+            failed_requests = len(df[df["status"] != "success"])
+
+            tps = total_tokens / duration_sec
+            rps = total_requests / duration_sec
+            
+            error_rate = (failed_requests / total_requests) * 100 if total_requests > 0 else 0
+
+            perf_cols = st.columns(3)
+
+            with perf_cols[0]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Max Users Before Performance Drops</div>
+                    <div class="metric-value">{max_perf_users}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with perf_cols[1]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Max Users Without Failures</div>
+                    <div class="metric-value">{max_safe_users}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with perf_cols[2]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Error Rate (%)</div>
+                    <div class="metric-value" style="color:{'red' if error_rate > 5 else 'green'};">
+                        {error_rate:.2f}%
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                        
+            # Create a new row for TPS, RPS, Error Rate cards
+            metric_row = st.columns(3)
+
+            with metric_row[0]:  
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">TTFT at Peak Load (Avg)</div>
+                    <div class="metric-value">{ttft_at_peak:.2f} s</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+
+            with metric_row[1]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">TPS (Tokens / sec)</div>
+                    <div class="metric-value">{tps:.2f}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with metric_row[2]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">RPS (Requests / sec)</div>
+                    <div class="metric-value">{rps:.2f}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+
+            st.markdown("---") 
+            st.subheader(":blue[Summary Metrics]")
+                        
             # --- First Row: Metrics 0–3 ---
+            # --- Metrics ---
+            metrics = [
+                ("Total Requests", len(df)),
+                ("Failures", len(df[df["status"] != "success"])),
+                #("RPS", round(len(df) / duration_sec, 2)),
+                ("Avg TTFT", f"{round(df['ttft'].mean(), 2)} s"),
+                ("Avg TPOT", f"{round(df['tpot'].mean(), 2)} s"),
+                ("Avg Latency", f"{round(df['total_latency'].mean(), 2)} s"),
+                ("Avg Tokens/Request", f"{round(df['tokens_per_request'].mean(), 2)}"),
+                ("Latency Percentiles", f"P50: {round(np.percentile(df['total_latency'], 50), 2)} s | "f"P95: {round(np.percentile(df['total_latency'], 95), 2)} s"),
+                ("Min/Max Latency", f"{round(df['total_latency'].min(), 2)} s | {round(df['total_latency'].max(), 2)} s"),
+            ]
+
             top_cols = st.columns(4)
             for i in range(4):
                 with top_cols[i]:
@@ -206,7 +358,7 @@ elif st.session_state.page == "Dashboard":
 
         # --- Bar Chart ---
         st.markdown("---")  # Horizontal divider
-
+        st.subheader(":blue[Benchmark Comparison: Latency & Throughput]")
         try:
             comparison_data = []
 
@@ -214,28 +366,45 @@ elif st.session_state.page == "Dashboard":
                 compare_df = pd.read_csv(os.path.join(DATA_DIR, file))
                 compare_df["timestamp"] = pd.to_datetime(compare_df["timestamp"])
                 duration_sec = max((compare_df["timestamp"].max() - compare_df["timestamp"].min()).total_seconds(), 1)
-                test_rps = round(len(compare_df) / duration_sec, 2)
 
-                test_id = file.replace("_metrics.csv", "")
+                test_rps = round(len(compare_df) / duration_sec, 2)
+                total_tokens = compare_df["tokens_per_request"].sum()
+                test_tps = round(total_tokens / duration_sec, 2)
+
+                config_filename = file.replace("_metrics.csv", "_config.json")
+                try:
+                    with open(os.path.join(DATA_DIR, config_filename), "r") as config_file:
+                        config = json.load(config_file)
+                        test_id = f"{config['users']}u_{config['spawn_rate']}u/s_{config['run_time']}"
+                except:
+                    test_id = file.replace("_metrics.csv", "")
+
                 comparison_data.append({
                     "Test": test_id,
                     "Max TTFT": compare_df["ttft"].max(),
                     "Max TPOT": compare_df["tpot"].max(),
                     "Max Total Latency": compare_df["total_latency"].max(),
-                    "Max RPS": test_rps,
-                    "Max TPS": compare_df["tps"].max()
+                    "RPS": test_rps,
+                    "TPS": test_tps
                 })
+
 
             comp_df = pd.DataFrame(comparison_data)
 
             # --- Add hover-specific columns ---
-            melted_latency = comp_df.melt(id_vars="Test", value_vars=["Max TTFT", "Max TPOT", "Max Total Latency"],
-                                          var_name="Metric", value_name="Value")
+            melted_latency = comp_df.melt(
+                id_vars="Test",
+                value_vars=["Max TTFT", "Max TPOT", "Max Total Latency"],
+                var_name="Metric", value_name="Value"
+            )
             melted_latency["Hover"] = melted_latency.apply(
                 lambda row: f"{row['Metric']}: {row['Value']:.2f} s<br>Test: {row['Test']}", axis=1)
 
-            melted_throughput = comp_df.melt(id_vars="Test", value_vars=["Max RPS", "Max TPS"],
-                                             var_name="Metric", value_name="Value")
+            melted_throughput = comp_df.melt(
+                id_vars="Test",
+                value_vars=["RPS", "TPS"],  # ✅ Change 1: use RPS & TPS instead of Max*
+                var_name="Metric", value_name="Value"
+            )
             melted_throughput["Hover"] = melted_throughput.apply(
                 lambda row: f"{row['Metric']}: {row['Value']:.2f} req/sec" if "RPS" in row["Metric"]
                 else f"{row['Metric']}: {row['Value']:.2f} tokens/sec<br>Test: {row['Test']}", axis=1)
@@ -264,16 +433,17 @@ elif st.session_state.page == "Dashboard":
                 with spacer:
                     st.markdown("<div style='border-left: 1px solid #DDD; height: 100%;'></div>", unsafe_allow_html=True)
 
-                # --- Throughput Chart ---
+                # --- Throughput Chart (Horizontal) ---
                 with col2:
+                    # ✅ Change 3: Horizontal bar chart
                     fig_tp = px.bar(
                         melted_throughput,
-                        x="Test",
-                        y="Value",
+                        y="Test",
+                        x="Value",
                         color="Metric",
-                        barmode="group",
+                        orientation="h",  # ✅ Change 3: Horizontal
                         custom_data=["Hover"],
-                        title="Throughput Metrics Across Tests",
+                        title="Throughput Metrics Across Tests (Horizontal)",
                         labels={"Value": "Rate", "Metric": "Metric"},
                         color_discrete_sequence=["#8202C4", "#0086EA"]
                     )
@@ -283,10 +453,11 @@ elif st.session_state.page == "Dashboard":
         except Exception as e:
             st.error(f"Error loading comparison data: {e}")
 
-        # --- Interactive Graphs for Selected File ---
+
+        # Distribution Plots metric vs concurrency and Time
         try:
             st.markdown("---")
-            st.subheader("Interactive Graphs for Selected Test")
+            st.subheader(":blue[Metric Trends Across Load and Time]")
 
             available_metrics = ["ttft", "tpot", "total_latency", "tps"]
 
@@ -312,7 +483,7 @@ elif st.session_state.page == "Dashboard":
                     },
                     color_discrete_sequence=[RED]
                 )
-                fig_concurrent.update_traces(mode="markers+lines")
+                fig_concurrent.update_traces(mode="markers")
                 st.plotly_chart(fig_concurrent, use_container_width=True)
 
             with plot_col2:

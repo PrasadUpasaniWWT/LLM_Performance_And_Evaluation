@@ -2,6 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-data/*.csv
+data/
 .env
 Pipfile.lock
