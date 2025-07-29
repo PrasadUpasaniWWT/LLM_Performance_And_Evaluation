@@ -149,13 +149,13 @@ elif st.session_state.page == "Dashboard":
                 config = json.load(f)
 
             config_summary = (
-                f"**Test Config** | "
                 f"🕒 `{config.get('timestamp', '-')}` | "
                 f"👥 Users: `{config.get('users', '-')}` | "
                 f"⚡ Spawn Rate: `{config.get('spawn_rate', '-')}/s` | "
                 f"⏱️ Duration: `{config.get('run_time', '-')}`"
             )
-            st.markdown(config_summary)
+            st.subheader(":blue[Test Parameters]")
+            st.subheader(config_summary)
         else:
             st.warning(f"Config file not found for `{timestamp_prefix}`.")
 
@@ -252,6 +252,7 @@ elif st.session_state.page == "Dashboard":
             total_tokens = df["tokens_per_request"].sum()
             total_requests = len(df)
             failed_requests = len(df[df["status"] != "success"])
+            tps_per_req_avg = df["tokens_per_request"].mean()
 
             tps = total_tokens / duration_sec
             rps = total_requests / duration_sec
@@ -279,10 +280,8 @@ elif st.session_state.page == "Dashboard":
             with perf_cols[2]:
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-label">Error Rate (%)</div>
-                    <div class="metric-value" style="color:{'red' if error_rate > 5 else 'green'};">
-                        {error_rate:.2f}%
-                    </div>
+                    <div class="metric-label">Time To First Token (Peak Load Avg)</div>
+                    <div class="metric-value">{ttft_at_peak:.2f} s</div>
                 </div>
                 """, unsafe_allow_html=True)
                         
@@ -292,8 +291,10 @@ elif st.session_state.page == "Dashboard":
             with metric_row[0]:  
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-label">TTFT at Peak Load (Avg)</div>
-                    <div class="metric-value">{ttft_at_peak:.2f} s</div>
+                    <div class="metric-label">TPS/Request (Avg)</div>
+                    <div class="metric-value">
+                        {tps_per_req_avg:.2f}
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -301,7 +302,7 @@ elif st.session_state.page == "Dashboard":
             with metric_row[1]:
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-label">TPS (Tokens / sec)</div>
+                    <div class="metric-label">TPS (Tokens/Sec)</div>
                     <div class="metric-value">{tps:.2f}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -309,7 +310,7 @@ elif st.session_state.page == "Dashboard":
             with metric_row[2]:
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-label">RPS (Requests / sec)</div>
+                    <div class="metric-label">RPS (Requests/Sec)</div>
                     <div class="metric-value">{rps:.2f}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -324,10 +325,10 @@ elif st.session_state.page == "Dashboard":
                 ("Total Requests", len(df)),
                 ("Failures", len(df[df["status"] != "success"])),
                 #("RPS", round(len(df) / duration_sec, 2)),
-                ("Avg TTFT", f"{round(df['ttft'].mean(), 2)} s"),
-                ("Avg TPOT", f"{round(df['tpot'].mean(), 2)} s"),
-                ("Avg Latency", f"{round(df['total_latency'].mean(), 2)} s"),
-                ("Avg Tokens/Request", f"{round(df['tokens_per_request'].mean(), 2)}"),
+                ("Time To First Token (Avg)", f"{round(df['ttft'].mean(), 2)} s"),
+                ("Time Per Output Token (Avg)", f"{round(df['tpot'].mean(), 2)} s"),
+                ("Latency (Avg)", f"{round(df['total_latency'].mean(), 2)} s"),
+                ("#Tokens/Request (Avg)", f"{round(df['tokens_per_request'].mean(), 2)}"),
                 ("Latency Percentiles", f"P50: {round(np.percentile(df['total_latency'], 50), 2)} s | "f"P95: {round(np.percentile(df['total_latency'], 95), 2)} s"),
                 ("Min/Max Latency", f"{round(df['total_latency'].min(), 2)} s | {round(df['total_latency'].max(), 2)} s"),
             ]
@@ -402,7 +403,7 @@ elif st.session_state.page == "Dashboard":
 
             melted_throughput = comp_df.melt(
                 id_vars="Test",
-                value_vars=["RPS", "TPS"],  # ✅ Change 1: use RPS & TPS instead of Max*
+                value_vars=["RPS", "TPS"], 
                 var_name="Metric", value_name="Value"
             )
             melted_throughput["Hover"] = melted_throughput.apply(
@@ -411,7 +412,7 @@ elif st.session_state.page == "Dashboard":
 
             # --- Layout container ---
             with st.container():
-                col1, spacer, col2 = st.columns([5, 0.5, 5])  # spacer for vertical divider
+                col1, spacer, col2 = st.columns([5, 0.5, 5])
 
                 # --- Latency Chart ---
                 with col1:
@@ -429,10 +430,6 @@ elif st.session_state.page == "Dashboard":
                     fig_lat.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
                     st.plotly_chart(fig_lat, use_container_width=True)
 
-                # --- Vertical Divider (fake) ---
-                with spacer:
-                    st.markdown("<div style='border-left: 1px solid #DDD; height: 100%;'></div>", unsafe_allow_html=True)
-
                 # --- Throughput Chart (Horizontal) ---
                 with col2:
                     # ✅ Change 3: Horizontal bar chart
@@ -447,6 +444,7 @@ elif st.session_state.page == "Dashboard":
                         labels={"Value": "Rate", "Metric": "Metric"},
                         color_discrete_sequence=["#8202C4", "#0086EA"]
                     )
+                    fig_tp.update_layout(barmode="group")
                     fig_tp.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
                     st.plotly_chart(fig_tp, use_container_width=True)
 
@@ -468,7 +466,7 @@ elif st.session_state.page == "Dashboard":
                 "tps": "tokens/sec"
             }
 
-            plot_col1, plot_col2 = st.columns(2)
+            plot_col1, spacer, plot_col2 = st.columns([5, 0.5, 5])
 
             with plot_col1:
                 y_metric_1 = st.selectbox("Y-Axis (vs Concurrent Requests):", available_metrics, key="select_concurrent")
