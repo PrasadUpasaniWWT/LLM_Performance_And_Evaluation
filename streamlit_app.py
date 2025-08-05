@@ -252,7 +252,7 @@ elif st.session_state.page == "Dashboard":
             total_tokens = df["tokens_per_request"].sum()
             total_requests = len(df)
             failed_requests = len(df[df["status"] != "success"])
-            tps_per_req_avg = df["tokens_per_request"].mean()
+            tps_per_req_avg = df["tps"].mean()
 
             tps = total_tokens / duration_sec
             rps = total_requests / duration_sec
